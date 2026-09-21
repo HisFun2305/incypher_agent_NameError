@@ -63,10 +63,13 @@ All context records are JSON dictionaries stored in the local SQLite database.
 
 ### `tools/llm_router.py`
 
-- `call_openai(prompt, require_deep_reasoning=False, *, max_attempts=3)` sends a
-  text chat request using the `default` alias, or `coding` when deeper reasoning
-  is requested. Transient connection errors and HTTP 408, 429, 500, 502, 503,
-  and 504 responses are retried with bounded exponential backoff.
+- `call_openai(prompt, require_deep_reasoning=False, *, chal_ID=None,
+  max_attempts=3, response_format=None)` sends a text chat request using the
+  `default` alias, or `coding` when deeper reasoning is requested. File
+  planning requests JSON structured output and falls back to prompted JSON when
+  the gateway rejects that format. Transient connection errors and HTTP 408,
+  429, 500, 502, 503, and 504 responses are retried with bounded exponential
+  backoff.
 - `call_multimodal_openai(prompt, image_paths, model_name='qwen3-vl:32b')`
   sends prompt text and local JPEG, PNG, GIF, or WebP images as data URLs to a
   vision-capable chat model using the same retry policy.
@@ -88,6 +91,9 @@ All context records are JSON dictionaries stored in the local SQLite database.
   `converted_file_paths`. It rejects path traversal, symbolic links, more than
   1,000 files, more than 512 MiB of uncompressed content, and existing output
   files that would otherwise be overwritten.
+- `extract_gzip_archive(archive_path, *, chal_ID, output_path=None)` safely
+  expands one `.gz` artifact with the same 512 MiB output bound and records the
+  generated artifact path.
 
 ## File-solver tools
 
@@ -96,10 +102,10 @@ All context records are JSON dictionaries stored in the local SQLite database.
 - `FileToolRequest` and `FileToolResult` provide the JSON-safe action and
   evidence contract for the file-solving agent.
 - `execute_file_tool(request, chal_ID)` dispatches one bounded `inspect`,
-  `gdb`, `wireshark`, `ghidra`, or `cyberchef` action and returns success or
-  error evidence without invoking an LLM. ZIP extraction, audio conversion,
-  and local executable interaction remain in `converter.py` and
-  `executable_client.py`.
+  `audio`, `ext4`, `gdb`, `wireshark`, `ghidra`, or `cyberchef` action and
+  returns success or error evidence without invoking an LLM. Archive
+  extraction, audio conversion, and local executable interaction remain in
+  `converter.py` and `executable_client.py`.
 - `inspect` returns bounded metadata, magic identification, printable strings,
   a UTF-8 preview, and an exact flag when present.
 - `run_gdb_analysis()` runs only fixed non-interactive GDB operations:
@@ -112,6 +118,10 @@ All context records are JSON dictionaries stored in the local SQLite database.
   CyberChef Node.js API and returns its JSON-safe result. It requires Node.js
   and the dependency declared beside its runner in
   `tools/file_solve_tools/cyberchef_runner/package.json`, not an API URL.
+- `run_audio_analysis()` returns a bounded WAV spectral summary or a
+  parameterized binary-FSK decode, including recovered text and any exact flag.
+- `run_ext4_analysis()` uses fixed, read-only `debugfs` operations to inspect
+  filesystem metadata, deleted inodes, journal records, or one selected inode.
 
 ### `tools/file_chal.py`
 
@@ -124,6 +134,12 @@ All context records are JSON dictionaries stored in the local SQLite database.
 - `analyze_image` is a solver action for JPEG, PNG, GIF, and WebP artifacts.
   It sends one selected local image plus a bounded question to the configured
   vision-capable model and stores its textual analysis as durable evidence.
+- Planner replies may contain surrounding prose or fenced Markdown: the solver
+  extracts the first valid JSON object and keeps planning after malformed
+  replies until its 20-action limit. An exact flag in the stored challenge
+  description is treated as observed challenge evidence.
+- `extract_gzip`, `audio`, and `ext4` extend the file-action loop with bounded
+  gzip expansion, signal analysis/FSK decoding, and read-only ext4 forensics.
 - `run_executable` is available for workspace-local ELF and PE file artifacts
   only after every discovered ZIP archive has been expanded. The file solver
   records successful ZIP extractions, then registers exact executable paths in

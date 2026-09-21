@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import shutil
 import stat
 import zipfile
@@ -106,6 +107,42 @@ def convert_audio_file(
         figure.savefig(destination, dpi=150)
     finally:
         plt.close(figure)
+
+    resolved_destination = destination.resolve()
+    _store_converted_files([resolved_destination], chal_ID)
+    return resolved_destination
+
+
+def extract_gzip_archive(
+    archive_path: str | Path,
+    *,
+    chal_ID: int,
+    output_path: str | Path | None = None,
+    max_output_size: int = 512 * 1024 * 1024,
+) -> Path:
+    """Safely expand one gzip artifact and record the resulting file path."""
+    source = Path(archive_path)
+    if not source.is_file():
+        raise FileNotFoundError(f"gzip archive does not exist: {source}")
+    if source.suffix.lower() != ".gz":
+        raise ValueError("extract_gzip requires a .gz artifact")
+    if max_output_size < 1:
+        raise ValueError("max_output_size must be positive")
+    destination = Path(output_path) if output_path is not None else source.with_suffix("")
+    if destination.exists():
+        raise FileExistsError(f"gzip output already exists: {destination}")
+
+    written = 0
+    try:
+        with gzip.open(source, "rb") as compressed, destination.open("xb") as output:
+            while chunk := compressed.read(64 * 1024):
+                written += len(chunk)
+                if written > max_output_size:
+                    raise ValueError(f"gzip archive exceeds the {max_output_size}-byte extraction limit")
+                output.write(chunk)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
 
     resolved_destination = destination.resolve()
     _store_converted_files([resolved_destination], chal_ID)
