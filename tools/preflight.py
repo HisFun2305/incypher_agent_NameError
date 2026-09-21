@@ -29,7 +29,7 @@ from tools.ctfd_api import (
     prepare_challenge_context,
 )
 from tools.llm_router import (
-    OPENROUTER_MODEL_CYCLE,
+    OPENROUTER_MODEL,
     call_openrouter,
     list_openai_models,
 )
@@ -75,26 +75,21 @@ def check_soclaas_connection() -> bool:
     return True
 
 
-def check_openrouter_models() -> bool:
-    """Verify direct access to every configured OpenRouter rotation model."""
+def check_openrouter_model() -> bool:
+    """Verify direct access to the configured Claude Sonnet 4 model."""
     if not os.getenv("OPENROUTER_API_KEY"):
-        print("[*] OPENROUTER_API_KEY is not set; skipping OpenRouter model checks.")
+        print("[*] OPENROUTER_API_KEY is not set; skipping the OpenRouter model check.")
         return True
-    print("[*] Testing direct OpenRouter access for each configured model...")
-    for model_name in OPENROUTER_MODEL_CYCLE:
-        try:
-            response = call_openrouter(
-                "Reply with exactly OK.",
-                model_name=model_name,
-                max_attempts=1,
-            )
-        except Exception as exc:
-            print(f"[-] OpenRouter model check failed for {model_name}: {exc}")
-            return False
-        if not response:
-            print(f"[-] OpenRouter model check returned no content for {model_name}.")
-            return False
-        print(f"[+] OpenRouter model check succeeded: {model_name}.")
+    print(f"[*] Testing direct OpenRouter access for {OPENROUTER_MODEL}...")
+    try:
+        response = call_openrouter("Reply with exactly OK.", max_attempts=1)
+    except Exception as exc:
+        print(f"[-] OpenRouter model check failed for {OPENROUTER_MODEL}: {exc}")
+        return False
+    if not response:
+        print(f"[-] OpenRouter model check returned no content for {OPENROUTER_MODEL}.")
+        return False
+    print(f"[+] OpenRouter model check succeeded: {OPENROUTER_MODEL}.")
     return True
 
 
@@ -266,8 +261,8 @@ def check_context_sqlite_connection() -> bool:
 def main() -> int:
     """Run the supported endpoint, connectivity, and storage checks."""
     if os.getenv("OPENROUTER_API_KEY"):
-        if input("OpenRouter API key is set. Do you want to check OpenRouter models? (y/n): ").strip().lower() == "y":
-            if not check_openrouter_models():
+        if input("OpenRouter API key is set. Do you want to check Claude Sonnet 4? (y/n): ").strip().lower() == "y":
+            if not check_openrouter_model():
                 return 2
     if not check_soclaas_connection():
         return 2

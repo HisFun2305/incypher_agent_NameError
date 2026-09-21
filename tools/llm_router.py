@@ -18,11 +18,7 @@ DEFAULT_MAX_ATTEMPTS = 3
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 _Result = TypeVar("_Result")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL_CYCLE = (
-    "anthropic/claude-sonnet-4",
-    "~openai/gpt-sol-latest",
-    "google/gemini-2.5-pro",
-)
+OPENROUTER_MODEL = "anthropic/claude-sonnet-4"
 
 
 class LLMResponseError(RuntimeError):
@@ -62,13 +58,6 @@ def _get_openrouter_client() -> OpenAI:
             default_headers=headers,
         )
     return openrouter_client
-
-
-def openrouter_model_for_challenge(chal_ID: int | None) -> str:
-    """Return the removable round-robin OpenRouter model choice for a challenge."""
-    if chal_ID is None:
-        return OPENROUTER_MODEL_CYCLE[0]
-    return OPENROUTER_MODEL_CYCLE[chal_ID % len(OPENROUTER_MODEL_CYCLE)]
 
 
 def _call_with_retry(
@@ -115,39 +104,11 @@ def _completion_content(response: Any) -> str:
     return content.strip()
 
 
-def _usage_value(response: Any, field: str) -> int | None:
-    usage = getattr(response, "usage", None)
-    value = getattr(usage, field, None)
-    return value if isinstance(value, int) else None
-
-
-def _log_output(
-    *, provider: str, model: str, response: Any, content: str, chal_ID: int | None
-) -> None:
-    """Best-effort local accounting, kept separate from routing mechanics."""
-    try:
-        from tools.llm_output_eval import log_model_output
-
-        log_model_output(
-            provider=provider,
-            model=model,
-            challenge_id=chal_ID,
-            prompt_tokens=_usage_value(response, "prompt_tokens"),
-            completion_tokens=_usage_value(response, "completion_tokens"),
-            total_tokens=_usage_value(response, "total_tokens"),
-            output_text=content,
-        )
-    except Exception as error:
-        print(f"[llm] output accounting failed: {error}")
-
-
 def _complete(
     client_instance: OpenAI,
     *,
-    provider: str,
     model: str,
     prompt: str,
-    chal_ID: int | None,
     extra_params: dict[str, Any],
 ) -> str:
     response = client_instance.chat.completions.create(
@@ -155,11 +116,7 @@ def _complete(
         messages=[{"role": "user", "content": prompt}],
         **extra_params,
     )
-    content = _completion_content(response)
-    _log_output(
-        provider=provider, model=model, response=response, content=content, chal_ID=chal_ID
-    )
-    return content
+    return _completion_content(response)
 
 
 def call_openai(
@@ -196,20 +153,16 @@ def call_openai(
 def call_openrouter(
     prompt: str,
     *,
-    model_name: str | None = None,
     chal_ID: int | None = None,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     extra_params: dict[str, Any] | None = None,
 ) -> str:
-    """Call one OpenRouter model directly, without SOCLAAS fallback."""
-    selected_model = model_name or openrouter_model_for_challenge(chal_ID)
+    """Call Claude Sonnet 4 through OpenRouter without SOCLAAS fallback."""
     return _call_with_retry(
         lambda: _complete(
             _get_openrouter_client(),
-            provider="openrouter",
-            model=selected_model,
+            model=OPENROUTER_MODEL,
             prompt=prompt,
-            chal_ID=chal_ID,
             extra_params=extra_params or {},
         ),
         max_attempts=max_attempts,
@@ -224,14 +177,12 @@ def call_soclaas(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     extra_params: dict[str, Any] | None = None,
 ) -> str:
-    """Call SOCLAAS directly; used as fallback and for local-output evaluation."""
+    """Call SOCLAAS directly as the OpenRouter fallback."""
     return _call_with_retry(
         lambda: _complete(
             _get_client(),
-            provider="soclaas",
             model=model_name,
             prompt=prompt,
-            chal_ID=chal_ID,
             extra_params=extra_params or {},
         ),
         max_attempts=max_attempts,
@@ -299,14 +250,6 @@ def call_multimodal_openai(
                 messages=[{"role": "user", "content": content}], #type: ignore
                 temperature=0.0,
             )
-        output = _completion_content(response)
-        _log_output(
-            provider="soclaas",
-            model=model_name,
-            response=response,
-            content=output,
-            chal_ID=chal_ID,
-        )
-        return output
+        return _completion_content(response)
 
     return _call_with_retry(complete_multimodal, max_attempts=max_attempts)

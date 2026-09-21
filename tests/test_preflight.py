@@ -24,7 +24,7 @@ class PreflightEndpointTests(unittest.TestCase):
         with (
             patch.dict(os.environ, {"OPENROUTER_API_KEY": "fixture"}, clear=False),
             patch("builtins.input", return_value="y"),
-            patch("tools.preflight.check_openrouter_models", side_effect=check_openrouter),
+            patch("tools.preflight.check_openrouter_model", side_effect=check_openrouter),
             patch("tools.preflight.check_soclaas_connection", side_effect=check_soclaas),
         ):
             self.assertEqual(preflight.main(), 2)

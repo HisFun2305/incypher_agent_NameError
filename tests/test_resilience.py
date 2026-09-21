@@ -12,8 +12,7 @@ from tools import context
 from tools.context import append_context_list, get_context, solver_progress, store_context, update_context
 from tools.ctfd_api import ChallengeFileDownloadError, download_challenge_files
 from tools.llm_router import LLMResponseError, _call_with_retry, _completion_content
-from tools.llm_router import OpenRouterUnavailableError, call_openai, openrouter_model_for_challenge
-from tools import llm_output_eval
+from tools.llm_router import OpenRouterUnavailableError, call_openai
 
 
 class ContextProgressTests(unittest.TestCase):
@@ -161,12 +160,6 @@ class LLMResponseTests(unittest.TestCase):
         self.assertEqual(_call_with_retry(operation, max_attempts=2), "usable completion")
         sleep.assert_called_once()
 
-    def test_openrouter_rotation_is_deterministic_per_challenge(self) -> None:
-        self.assertEqual(openrouter_model_for_challenge(0), "anthropic/claude-sonnet-4")
-        self.assertEqual(openrouter_model_for_challenge(1), "~openai/gpt-sol-latest")
-        self.assertEqual(openrouter_model_for_challenge(2), "google/gemini-2.5-pro")
-        self.assertEqual(openrouter_model_for_challenge(3), "anthropic/claude-sonnet-4")
-
     @patch("tools.llm_router.call_soclaas")
     @patch("tools.llm_router._complete", return_value="openrouter result")
     @patch("tools.llm_router._get_openrouter_client", return_value=object())
@@ -183,63 +176,5 @@ class LLMResponseTests(unittest.TestCase):
     def test_soclaas_is_used_only_after_openrouter_is_unavailable(self, _client, fallback) -> None:
         self.assertEqual(call_openai("harmless", chal_ID=1, max_attempts=1), "soclaas result")
         fallback.assert_called_once()
-
-
-class OutputEvaluationTests(unittest.TestCase):
-    """Keep optional local model accounting independent of real gateways."""
-
-    def setUp(self) -> None:
-        self.temporary_directory = tempfile.TemporaryDirectory()
-        self.path_patch = patch.object(
-            llm_output_eval,
-            "OUTPUT_EVAL_DB_PATH",
-            Path(self.temporary_directory.name) / "outputs.sqlite3",
-        )
-        self.results_path_patch = patch.object(
-            llm_output_eval,
-            "EVAL_RESULTS_PATH",
-            Path(self.temporary_directory.name) / "eval_results.txt",
-        )
-        self.path_patch.start()
-        self.results_path_patch.start()
-
-    def tearDown(self) -> None:
-        self.results_path_patch.stop()
-        self.path_patch.stop()
-        self.temporary_directory.cleanup()
-
-    def test_logs_token_usage_and_output(self) -> None:
-        llm_output_eval.log_model_output(
-            provider="openrouter",
-            model="fixture-model",
-            challenge_id=12,
-            prompt_tokens=10,
-            completion_tokens=5,
-            total_tokens=15,
-            output_text="harmless fixture output",
-        )
-        record = llm_output_eval.recent_model_outputs(challenge_id=12)[0]
-        self.assertEqual(record["total_tokens"], 15)
-        self.assertEqual(record["output"], "harmless fixture output")
-
-    @patch("tools.llm_router.call_soclaas", return_value='{"best_performing_model":"a"}')
-    def test_digest_uses_soclaas_directly(self, call_soclaas) -> None:
-        llm_output_eval.log_model_output(
-            provider="openrouter",
-            model="fixture-model",
-            challenge_id=13,
-            prompt_tokens=1,
-            completion_tokens=1,
-            total_tokens=2,
-            output_text="harmless fixture output",
-        )
-        result = llm_output_eval.digest_model_outputs(challenge_id=13)
-        self.assertIn("best_performing_model", result)
-        call_soclaas.assert_called_once()
-        saved_result = llm_output_eval.EVAL_RESULTS_PATH.read_text(encoding="utf-8")
-        self.assertIn("challenge 13", saved_result)
-        self.assertIn(result, saved_result)
-
-
 if __name__ == "__main__":
     unittest.main()
