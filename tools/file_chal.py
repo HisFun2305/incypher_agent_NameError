@@ -374,6 +374,30 @@ def _parse_action(raw_plan: str, artifact_paths: list[Path]) -> tuple[dict[str, 
     return {"tool": tool, "artifact_path": str(path), "arguments": arguments}, hypothesis
 
 
+def _planner_recovery_action(
+    artifacts: list[Path], context: dict[str, Any]
+) -> tuple[dict[str, object], str] | None:
+    """Inspect each artifact once when the planner cannot produce an action.
+
+    This makes a transient LLM formatting or gateway failure observable as real
+    file evidence, rather than consuming the whole solver budget with no tool
+    execution.  It deliberately stays read-only and never guesses a flag.
+    """
+    inspected_paths = {
+        str(Path(item.get("artifact_path")).resolve())
+        for item in _recent_tool_results(context)
+        if item.get("tool") == "inspect" and isinstance(item.get("artifact_path"), str)
+    }
+    for artifact in artifacts:
+        path = str(artifact.resolve())
+        if path not in inspected_paths:
+            return (
+                {"tool": "inspect", "artifact_path": path, "arguments": {}},
+                "The planner response was unusable; collect baseline file evidence.",
+            )
+    return None
+
+
 def _execute_action(
     action: dict[str, object],
     chal_ID: int,
@@ -702,7 +726,11 @@ def file_chal_solver(chal_ID: int) -> str | None:
             except Exception as exc:
                 _planner_error(chal_ID, str(exc))
                 print(f"[file] Challenge {chal_ID} planner error: {exc}")
-                continue
+                recovery = _planner_recovery_action(artifacts, context)
+                if recovery is None:
+                    continue
+                action, hypothesis = recovery
+                print(f"[file] Challenge {chal_ID} using planner recovery: inspect")
 
             result = _execute_action(action, chal_ID, context, runtime)
             if result.flag is None:
