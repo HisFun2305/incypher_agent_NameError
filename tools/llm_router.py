@@ -125,29 +125,43 @@ def call_openai(
     *,
     chal_ID: int | None = None,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    response_format: dict[str, Any] | None = None,
 ) -> str:
     """Use OpenRouter first, falling back to SOCLAAS when it is unavailable."""
     model_name = "coding" if require_deep_reasoning else "default"
     extra_params: dict[str, Any] = {}
     if not require_deep_reasoning:
         extra_params["temperature"] = 0.0
+    if response_format is not None:
+        extra_params["response_format"] = response_format
 
-    try:
-        return call_openrouter(
+    def complete(parameters: dict[str, Any]) -> str:
+        try:
+            return call_openrouter(
+                prompt,
+                chal_ID=chal_ID,
+                max_attempts=max_attempts,
+                extra_params=parameters,
+            )
+        except (OpenRouterUnavailableError, APIConnectionError, APIStatusError, LLMResponseError) as error:
+            print(f"[llm] OpenRouter unavailable; falling back to SOCLAAS: {error}")
+        return call_soclaas(
             prompt,
+            model_name=model_name,
             chal_ID=chal_ID,
             max_attempts=max_attempts,
-            extra_params=extra_params,
+            extra_params=parameters,
         )
-    except (OpenRouterUnavailableError, APIConnectionError, APIStatusError, LLMResponseError) as error:
-        print(f"[llm] OpenRouter unavailable; falling back to SOCLAAS: {error}")
-    return call_soclaas(
-        prompt,
-        model_name=model_name,
-        chal_ID=chal_ID,
-        max_attempts=max_attempts,
-        extra_params=extra_params,
-    )
+
+    try:
+        return complete(extra_params)
+    except APIStatusError as error:
+        if response_format is None or error.status_code != 400:
+            raise
+        print("[llm] gateway does not support structured output; falling back to prompted JSON")
+        fallback_params = dict(extra_params)
+        fallback_params.pop("response_format", None)
+        return complete(fallback_params)
 
 
 def call_openrouter(

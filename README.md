@@ -62,6 +62,10 @@ close actions during one solver invocation. Each process session has a
 at 15 seconds. Set `FILE_SOLVER_EXECUTABLE_SESSION_SECONDS` to a value from 15
 to 600 seconds when a challenge needs more interaction time.
 
+The file solver also supports bounded gzip expansion, audio spectral summaries
+and parameterized FSK decoding, plus read-only ext4 inspection through
+`debugfs` when that local utility is available.
+
 ## Docker setup
 
 ```powershell

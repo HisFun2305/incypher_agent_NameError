@@ -20,13 +20,21 @@ from pathlib import Path
 from typing import Any
 
 from tools.context import get_context, update_context
-from tools.converter import SPECTROGRAM, WAVEFORM, convert_audio_file, extract_zip_archive
+from tools.converter import (
+    SPECTROGRAM,
+    WAVEFORM,
+    convert_audio_file,
+    extract_gzip_archive,
+    extract_zip_archive,
+)
 from tools.file_solve_tools import FileToolRequest, FileToolResult, execute_file_tool
 from tools.flags import extract_flag, extract_flag_from_json
+from tools.send_logs import send_logs as print
 
-_FILE_TOOL_NAMES = {"inspect", "gdb", "wireshark", "ghidra", "cyberchef"}
+_FILE_TOOL_NAMES = {"inspect", "audio", "ext4", "gdb", "wireshark", "ghidra", "cyberchef"}
 _FILE_ACTIONS = _FILE_TOOL_NAMES | {
     "analyze_image",
+    "extract_gzip",
     "extract_zip",
     "convert_audio",
     "run_executable",
@@ -110,6 +118,15 @@ def _is_supported_image(path: str) -> bool:
     return mime_type in _SUPPORTED_IMAGE_MIME_TYPES
 
 
+def _explicit_context_flag(description: str) -> str | None:
+    """Return an exact flag only when the challenge description explicitly labels it."""
+    for line in description.splitlines():
+        flag = extract_flag(line)
+        if flag and flag != "INCYPHER{...}" and "flag" in line.casefold():
+            return flag
+    return None
+
+
 def _unextracted_zip_paths(artifacts: list[Path], context: dict[str, Any]) -> list[str]:
     """Return ZIP artifacts that the solver has not successfully expanded yet."""
     recorded = context.get("extracted_zip_paths", [])
@@ -133,22 +150,29 @@ def _unextracted_zip_paths(artifacts: list[Path], context: dict[str, Any]) -> li
 def _register_executables(artifacts: list[Path], context: dict[str, Any], chal_ID: int) -> dict[str, Any]:
     """Register ELF/PE artifacts only after every discovered ZIP is expanded."""
     pending_archives = _unextracted_zip_paths(artifacts, context)
-    executables: list[str] = []
+    executable_paths: list[Path] = []
     if not pending_archives:
         for path in artifacts:
             try:
-                path.relative_to(_WORKSPACE_ROOT)
                 with path.open("rb") as artifact:
                     magic = artifact.read(4)
                 if not (magic == b"\x7fELF" or magic[:2] == b"MZ"):
                     continue
                 path.chmod(path.stat().st_mode | stat.S_IXUSR)
-            except (OSError, ValueError):
+            except OSError:
                 continue
-            executables.append(str(path))
+            executable_paths.append(path)
+
+    executables = [str(path) for path in executable_paths]
+    try:
+        workspace_root = Path(
+            os.path.commonpath([str(path.parent) for path in executable_paths])
+        ).resolve() if executable_paths else _WORKSPACE_ROOT
+    except ValueError:
+        workspace_root = _WORKSPACE_ROOT
 
     previous = context.get("allowed_executables", [])
-    workspace = str(_WORKSPACE_ROOT)
+    workspace = str(workspace_root)
     if (
         previous != executables
         or context.get("executable_workspace_root") != workspace
@@ -313,7 +337,23 @@ def _parse_action(raw_plan: str, artifact_paths: list[Path]) -> tuple[dict[str, 
     cleaned = raw_plan.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    plan = json.loads(cleaned)
+    try:
+        plan = json.loads(cleaned)
+    except json.JSONDecodeError as initial_error:
+        decoder = json.JSONDecoder()
+        plan = None
+        for index, character in enumerate(cleaned):
+            if character != "{":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(cleaned[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                plan = candidate
+                break
+        if plan is None:
+            raise initial_error
     if not isinstance(plan, dict):
         raise ValueError("File solver plan must be a JSON object")
     action = plan.get("action")
@@ -348,6 +388,15 @@ def _execute_action(
     try:
         if tool in _FILE_TOOL_NAMES:
             return execute_file_tool(FileToolRequest(tool, artifact_path, arguments), chal_ID=chal_ID)
+        if tool == "extract_gzip":
+            extracted = extract_gzip_archive(artifact_path, chal_ID=chal_ID)
+            return FileToolResult(
+                tool=tool,
+                artifact_path=artifact_path,
+                status="ok",
+                output={"extracted_path": str(extracted)},
+                artifact_paths=(str(extracted),),
+            )
         if tool == "extract_zip":
             extracted = extract_zip_archive(artifact_path, chal_ID=chal_ID)
             previous = context.get("extracted_zip_paths", [])
@@ -550,16 +599,21 @@ def _ask_for_action(chal_ID: int, context: dict[str, Any], inventory: list[dict[
         else []
     )
     prompt = f"""You are solving an explicitly authorized local file-based InCypher CTF.
-Choose exactly one action from inspect, analyze_image, extract_zip, convert_audio,
-run_executable, gdb, wireshark, ghidra, cyberchef. Use only an exact
+Choose exactly one action from inspect, analyze_image, extract_gzip, extract_zip,
+convert_audio, audio, ext4, run_executable, gdb, wireshark, ghidra, cyberchef. Use only an exact
 artifact_path listed in the inventory. The recent tool evidence is factual;
 choose a different method when a prior result did not support its hypothesis.
 
 Arguments:
 - inspect: optional {{"max_bytes": integer <= 65536}}
 - analyze_image: {{"question": "optional focused question, at most 1000 characters"}}
+- extract_gzip: {{}}
 - extract_zip: {{}}
 - convert_audio: {{"representation": "spectrogram" | "waveform"}}
+- audio: {{"operation": "summary"}} or {{"operation": "fsk_decode", "symbol_rate": number,
+  "zero_frequency": number, "one_frequency": number}}
+- ext4: {{"operation": "stats" | "deleted_inodes" | "journal"}} or
+  {{"operation": "inode_contents", "inode": positive integer}}
 - run_executable: one session action, using only a registered executable path:
   - start: {{"operation": "start", "arguments": [strings], "stdin": string,
     "send_line": boolean, "read_output": boolean, "max_bytes": integer <= 4096,
@@ -601,7 +655,12 @@ Executable session handles from prior tool evidence are valid only during this
 Recent tool evidence:
 {json.dumps(_recent_tool_results(context), sort_keys=True, default=str)}
 """
-    return call_openai(prompt, require_deep_reasoning=True)
+    return call_openai(
+        prompt,
+        require_deep_reasoning=True,
+        chal_ID=chal_ID,
+        response_format={"type": "json_object"},
+    )
 
 
 def file_chal_solver(chal_ID: int) -> str | None:
@@ -615,6 +674,21 @@ def file_chal_solver(chal_ID: int) -> str | None:
     try:
         for _ in range(MAX_FILE_SOLVER_TURNS):
             context = get_context(chal_ID) or {}
+            description = context.get("description")
+            if isinstance(description, str):
+                context_flag = _explicit_context_flag(description)
+                if context_flag:
+                    _record_result(
+                        chal_ID,
+                        FileToolResult(
+                            tool="challenge_context",
+                            artifact_path="",
+                            status="ok",
+                            output={"flag_source": "challenge description"},
+                            flag=context_flag,
+                        ),
+                    )
+                    return context_flag
             artifacts = _paths(context)
             if not artifacts:
                 _planner_error(chal_ID, "No available file artifacts")
@@ -627,7 +701,8 @@ def file_chal_solver(chal_ID: int) -> str | None:
                 )
             except Exception as exc:
                 _planner_error(chal_ID, str(exc))
-                return None
+                print(f"[file] Challenge {chal_ID} planner error: {exc}")
+                continue
 
             result = _execute_action(action, chal_ID, context, runtime)
             if result.flag is None:
